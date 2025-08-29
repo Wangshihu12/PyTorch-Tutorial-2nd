@@ -206,50 +206,112 @@ def show_conf_mat(confusion_mat, classes, set_name, out_dir, epoch=999, verbose=
 
 
 class ModelTrainer(object):
+    """
+    模型训练器类
+    
+    提供模型训练和评估的静态方法，包含完整的训练循环和性能评估逻辑
+    使用静态方法设计，便于调用而不需要实例化
+    """
 
     @staticmethod
     def train_one_epoch(data_loader, model, loss_f, optimizer, scheduler, epoch_idx, device, args, logger, classes):
+        """
+        训练一个完整的epoch
+        
+        执行完整的训练循环，包括前向传播、反向传播、参数更新和性能监控
+        
+        @param data_loader: DataLoader, 训练数据加载器
+        @param model: nn.Module, 要训练的神经网络模型
+        @param loss_f: nn.Module, 损失函数
+        @param optimizer: torch.optim.Optimizer, 优化器
+        @param scheduler: torch.optim.lr_scheduler._LRScheduler, 学习率调度器
+        @param epoch_idx: int, 当前epoch的索引
+        @param device: torch.device, 计算设备（GPU或CPU）
+        @param args: argparse.Namespace, 训练参数配置
+        @param logger: Logger, 日志记录器
+        @param classes: list, 类别名称列表
+        
+        @return: tuple, 返回(损失统计器, Top1准确率统计器, 混淆矩阵)
+        """
+        # 设置模型为训练模式（启用dropout、batch normalization等）
         model.train()
+        
+        # 记录epoch开始时间
         end = time.time()
 
+        # 获取类别数量
         class_num = len(classes)
+        
+        # 初始化混淆矩阵，用于统计分类结果
+        # conf_mat[i][j] 表示真实类别为i，预测类别为j的样本数量
         conf_mat = np.zeros((class_num, class_num))
 
-        loss_m = AverageMeter()
-        top1_m = AverageMeter()
-        top5_m = AverageMeter()
-        batch_time_m = AverageMeter()
+        # 创建各种指标的统计器
+        loss_m = AverageMeter()        # 损失值统计器
+        top1_m = AverageMeter()        # Top1准确率统计器
+        top5_m = AverageMeter()        # Top5准确率统计器
+        batch_time_m = AverageMeter()  # 批次处理时间统计器
 
+        # 获取最后一个批次的索引，用于进度显示
         last_idx = len(data_loader) - 1
+        
+        # 遍历训练数据的所有批次
         for batch_idx, data in enumerate(data_loader):
-
+            # 解包数据，获取输入和标签
             inputs, labels = data
+            
+            # 将数据移动到指定设备（GPU或CPU）
             inputs, labels = inputs.to(device), labels.to(device)
-            # forward & backward
+            
+            # =============================== 前向传播和反向传播 ===============================
+            # 前向传播：计算模型输出
             outputs = model(inputs)
+            
+            # 清空梯度缓存，避免梯度累积
             optimizer.zero_grad()
 
+            # 计算损失（注意：将输出和标签移到CPU上计算损失）
+            # 这是因为某些损失函数在GPU上可能不稳定
             loss = loss_f(outputs.cpu(), labels.cpu())
+            
+            # 反向传播：计算梯度
             loss.backward()
+            
+            # 参数更新：根据梯度更新模型参数
             optimizer.step()
 
-            # 计算accuracy
+            # =============================== 性能计算 ===============================
+            # 计算Top1和Top5准确率
+            # acc1: Top1准确率，即预测概率最高的类别是否正确
+            # acc5: Top5准确率，即真实标签是否在预测概率前5的类别中
             acc1, acc5 = accuracy(outputs, labels, topk=(1, 5))
 
+            # 获取预测结果（Top1预测）
+            # torch.max返回最大值和对应的索引，这里我们只需要索引
             _, predicted = torch.max(outputs.data, 1)
+            
+            # 更新混淆矩阵
+            # 统计每个类别的预测情况
             for j in range(len(labels)):
-                cate_i = labels[j].cpu().numpy()
-                pre_i = predicted[j].cpu().numpy()
-                conf_mat[cate_i, pre_i] += 1.
+                cate_i = labels[j].cpu().numpy()    # 真实类别索引
+                pre_i = predicted[j].cpu().numpy()  # 预测类别索引
+                conf_mat[cate_i, pre_i] += 1.       # 在对应位置加1
 
-            # 记录指标
-            loss_m.update(loss.item(), inputs.size(0))  # 因update里： self.sum += val * n， 因此需要传入batch数量
-            top1_m.update(acc1.item(), outputs.size(0))
-            top5_m.update(acc5.item(), outputs.size(0))
+            # =============================== 指标记录 ===============================
+            # 更新各种统计指标
+            # 注意：update方法的第二个参数是样本数量，用于计算加权平均
+            # 因为update里：self.sum += val * n，所以需要传入batch数量
+            loss_m.update(loss.item(), inputs.size(0))      # 更新损失统计
+            top1_m.update(acc1.item(), outputs.size(0))    # 更新Top1准确率统计
+            top5_m.update(acc5.item(), outputs.size(0))    # 更新Top5准确率统计
 
-            # 打印训练信息
+            # =============================== 时间统计和日志输出 ===============================
+            # 更新批次处理时间统计
             batch_time_m.update(time.time() - end)
             end = time.time()
+            
+            # 按照指定频率打印训练信息
+            # args.print_freq控制打印频率，例如每80个batch打印一次
             if batch_idx % args.print_freq == args.print_freq - 1:
                 logger.info(
                     '{0}: [{1:>4d}/{2}]  '
@@ -258,40 +320,75 @@ class ModelTrainer(object):
                     'Acc@1: {top1.val:>7.4f} ({top1.avg:>7.4f})  '
                     'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
                         "train", batch_idx, last_idx, batch_time=batch_time_m,
-                        loss=loss_m, top1=top1_m, top5=top5_m))  # val是当次传进去的值，avg是整体平均值。
+                        loss=loss_m, top1=top1_m, top5=top5_m))
+                # 说明：val是当次传进去的值，avg是整体平均值
+        
+        # 返回训练统计结果
         return loss_m, top1_m, conf_mat
 
     @staticmethod
     def evaluate(data_loader, model, loss_f, device, classes):
+        """
+        评估模型性能
+        
+        在验证集或测试集上评估模型，不进行参数更新，只计算性能指标
+        
+        @param data_loader: DataLoader, 验证/测试数据加载器
+        @param model: nn.Module, 要评估的神经网络模型
+        @param loss_f: nn.Module, 损失函数
+        @param device: torch.device, 计算设备（GPU或CPU）
+        @param classes: list, 类别名称列表
+        
+        @return: tuple, 返回(损失统计器, Top1准确率统计器, 混淆矩阵)
+        """
+        # 设置模型为评估模式（禁用dropout、使用训练好的batch normalization统计）
         model.eval()
 
+        # 获取类别数量
         class_num = len(classes)
+        
+        # 初始化混淆矩阵
         conf_mat = np.zeros((class_num, class_num))
 
-        loss_m = AverageMeter()
-        top1_m = AverageMeter()
-        top5_m = AverageMeter()
+        # 创建性能指标统计器
+        loss_m = AverageMeter()    # 损失值统计器
+        top1_m = AverageMeter()    # Top1准确率统计器
+        top5_m = AverageMeter()    # Top5准确率统计器
 
+        # 遍历验证/测试数据的所有批次
         for i, data in enumerate(data_loader):
+            # 解包数据
             inputs, labels = data
+            
+            # 将数据移动到指定设备
             inputs, labels = inputs.to(device), labels.to(device)
+            
+            # 前向传播（不计算梯度，节省内存和计算时间）
             outputs = model(inputs)
+            
+            # 计算损失
             loss = loss_f(outputs.cpu(), labels.cpu())
 
-            # 计算accuracy
+            # =============================== 性能计算 ===============================
+            # 计算Top1和Top5准确率
             acc1, acc5 = accuracy(outputs, labels, topk=(1, 5))
 
+            # 获取预测结果
             _, predicted = torch.max(outputs.data, 1)
+            
+            # 更新混淆矩阵
             for j in range(len(labels)):
-                cate_i = labels[j].cpu().numpy()
-                pre_i = predicted[j].cpu().numpy()
-                conf_mat[cate_i, pre_i] += 1.
+                cate_i = labels[j].cpu().numpy()    # 真实类别索引
+                pre_i = predicted[j].cpu().numpy()  # 预测类别索引
+                conf_mat[cate_i, pre_i] += 1.       # 在对应位置加1
 
-            # 记录指标
-            loss_m.update(loss.item(), inputs.size(0))  # 因update里： self.sum += val * n， 因此需要传入batch数量
-            top1_m.update(acc1.item(), outputs.size(0))
-            top5_m.update(acc5.item(), outputs.size(0))
+            # =============================== 指标记录 ===============================
+            # 更新各种统计指标
+            loss_m.update(loss.item(), inputs.size(0))      # 更新损失统计
+            top1_m.update(acc1.item(), outputs.size(0))    # 更新Top1准确率统计
+            top5_m.update(acc5.item(), outputs.size(0))    # 更新Top5准确率统计
 
+        # 返回评估统计结果
         return loss_m, top1_m, conf_mat
 
 
