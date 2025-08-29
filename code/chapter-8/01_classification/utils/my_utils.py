@@ -208,50 +208,90 @@ def show_conf_mat(confusion_mat, classes, set_name, out_dir, epoch=999, verbose=
 
 
 class ModelTrainer(object):
+    """
+    模型训练器类：提供模型训练和评估的静态方法
+    包含单epoch训练和模型评估两个核心功能
+    """
 
     @staticmethod
     def train_one_epoch(data_loader, model, loss_f, optimizer, scheduler, epoch_idx, device, args, logger, classes):
+        """
+        训练一个完整的epoch
+        
+        @param data_loader: 数据加载器，提供训练数据批次
+        @param model: 要训练的深度学习模型
+        @param loss_f: 损失函数
+        @param optimizer: 优化器，用于更新模型参数
+        @param scheduler: 学习率调度器
+        @param epoch_idx: 当前epoch索引
+        @param device: 计算设备（GPU或CPU）
+        @param args: 训练参数配置
+        @param logger: 日志记录器
+        @param classes: 类别标签列表
+        @return: 返回训练损失、Top1准确率和混淆矩阵
+        """
+        # 将模型设置为训练模式，启用dropout、batch normalization等训练相关层
         model.train()
+        # 记录训练开始时间
         end = time.time()
 
+        # 获取类别数量，用于初始化混淆矩阵
         class_num = len(classes)
+        # 初始化混淆矩阵：行表示真实标签，列表示预测标签
         conf_mat = np.zeros((class_num, class_num))
 
-        loss_m = AverageMeter()
-        top1_m = AverageMeter()
-        top5_m = AverageMeter()
-        batch_time_m = AverageMeter()
+        # 创建各种指标的平均值计算器
+        loss_m = AverageMeter()      # 损失值统计器
+        top1_m = AverageMeter()      # Top1准确率统计器
+        top5_m = AverageMeter()      # Top5准确率统计器
+        batch_time_m = AverageMeter() # 批次处理时间统计器
 
+        # 计算最后一个批次的索引，用于日志显示
         last_idx = len(data_loader) - 1
+        
+        # 遍历数据加载器中的每个批次
         for batch_idx, data in enumerate(data_loader):
 
+            # 解包数据：inputs为输入图像，labels为真实标签
             inputs, labels = data
+            # 将数据移动到指定设备（GPU或CPU）
             inputs, labels = inputs.to(device), labels.to(device)
-            # forward & backward
+            
+            # 前向传播：模型推理，计算输出
             outputs = model(inputs)
+            # 清空梯度：防止梯度累积
             optimizer.zero_grad()
 
+            # 计算损失：将输出和标签移到CPU上计算损失（某些损失函数可能不支持GPU）
             loss = loss_f(outputs.cpu(), labels.cpu())
+            # 反向传播：计算梯度
             loss.backward()
+            # 参数更新：根据梯度更新模型参数
             optimizer.step()
 
-            # 计算accuracy
+            # 计算准确率：Top1和Top5准确率
             acc1, acc5 = accuracy(outputs, labels, topk=(1, 5))
 
+            # 获取预测结果：选择概率最高的类别作为预测标签
             _, predicted = torch.max(outputs.data, 1)
+            
+            # 更新混淆矩阵：统计每个类别的预测情况
             for j in range(len(labels)):
-                cate_i = labels[j].cpu().numpy()
-                pre_i = predicted[j].cpu().numpy()
-                conf_mat[cate_i, pre_i] += 1.
+                cate_i = labels[j].cpu().numpy()    # 真实类别索引
+                pre_i = predicted[j].cpu().numpy()  # 预测类别索引
+                conf_mat[cate_i, pre_i] += 1.       # 在对应位置累加计数
 
-            # 记录指标
-            loss_m.update(loss.item(), inputs.size(0))  # 因update里： self.sum += val * n， 因此需要传入batch数量
-            top1_m.update(acc1.item(), outputs.size(0))
-            top5_m.update(acc5.item(), outputs.size(0))
+            # 更新统计指标：记录当前批次的损失、准确率等指标
+            # 注意：update方法内部使用 self.sum += val * n，因此需要传入batch数量
+            loss_m.update(loss.item(), inputs.size(0))      # 更新损失统计
+            top1_m.update(acc1.item(), outputs.size(0))    # 更新Top1准确率统计
+            top5_m.update(acc5.item(), outputs.size(0))    # 更新Top5准确率统计
 
-            # 打印训练信息
+            # 更新批次处理时间统计
             batch_time_m.update(time.time() - end)
             end = time.time()
+            
+            # 按指定频率打印训练信息：每隔print_freq个批次打印一次
             if batch_idx % args.print_freq == args.print_freq - 1:
                 logger.info(
                     '{0}: [{1:>4d}/{2}]  '
@@ -261,39 +301,66 @@ class ModelTrainer(object):
                     'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
                         "train", batch_idx, last_idx, batch_time=batch_time_m,
                         loss=loss_m, top1=top1_m, top5=top5_m))  # val是当次传进去的值，avg是整体平均值。
+        
+        # 返回训练结果：平均损失、Top1准确率和混淆矩阵
         return loss_m, top1_m, conf_mat
 
     @staticmethod
     def evaluate(data_loader, model, loss_f, device, classes):
+        """
+        评估模型性能：在验证集或测试集上评估模型
+        
+        @param data_loader: 数据加载器，提供评估数据批次
+        @param model: 要评估的深度学习模型
+        @param loss_f: 损失函数
+        @param device: 计算设备（GPU或CPU）
+        @param classes: 类别标签列表
+        @return: 返回评估损失、Top1准确率和混淆矩阵
+        """
+        # 将模型设置为评估模式，禁用dropout、batch normalization等训练相关层
         model.eval()
 
+        # 获取类别数量，用于初始化混淆矩阵
         class_num = len(classes)
+        # 初始化混淆矩阵：行表示真实标签，列表示预测标签
         conf_mat = np.zeros((class_num, class_num))
 
-        loss_m = AverageMeter()
-        top1_m = AverageMeter()
-        top5_m = AverageMeter()
+        # 创建各种指标的平均值计算器
+        loss_m = AverageMeter()      # 损失值统计器
+        top1_m = AverageMeter()      # Top1准确率统计器
+        top5_m = AverageMeter()      # Top5准确率统计器
 
+        # 遍历数据加载器中的每个批次
         for i, data in enumerate(data_loader):
+            # 解包数据：inputs为输入图像，labels为真实标签
             inputs, labels = data
+            # 将数据移动到指定设备（GPU或CPU）
             inputs, labels = inputs.to(device), labels.to(device)
+            
+            # 前向传播：模型推理，计算输出（不计算梯度）
             outputs = model(inputs)
+            # 计算损失：将输出和标签移到CPU上计算损失
             loss = loss_f(outputs.cpu(), labels.cpu())
 
-            # 计算accuracy
+            # 计算准确率：Top1和Top5准确率
             acc1, acc5 = accuracy(outputs, labels, topk=(1, 5))
 
+            # 获取预测结果：选择概率最高的类别作为预测标签
             _, predicted = torch.max(outputs.data, 1)
+            
+            # 更新混淆矩阵：统计每个类别的预测情况
             for j in range(len(labels)):
-                cate_i = labels[j].cpu().numpy()
-                pre_i = predicted[j].cpu().numpy()
-                conf_mat[cate_i, pre_i] += 1.
+                cate_i = labels[j].cpu().numpy()    # 真实类别索引
+                pre_i = predicted[j].cpu().numpy()  # 预测类别索引
+                conf_mat[cate_i, pre_i] += 1.       # 在对应位置累加计数
 
-            # 记录指标
-            loss_m.update(loss.item(), inputs.size(0))  # 因update里： self.sum += val * n， 因此需要传入batch数量
-            top1_m.update(acc1.item(), outputs.size(0))
-            top5_m.update(acc5.item(), outputs.size(0))
+            # 更新统计指标：记录当前批次的损失、准确率等指标
+            # 注意：update方法内部使用 self.sum += val * n，因此需要传入batch数量
+            loss_m.update(loss.item(), inputs.size(0))      # 更新损失统计
+            top1_m.update(acc1.item(), outputs.size(0))    # 更新Top1准确率统计
+            top5_m.update(acc5.item(), outputs.size(0))    # 更新Top5准确率统计
 
+        # 返回评估结果：平均损失、Top1准确率和混淆矩阵
         return loss_m, top1_m, conf_mat
 
 
@@ -341,52 +408,117 @@ class ModelTrainerEnsemble(ModelTrainer):
 
 
 class Logger(object):
+    """
+    自定义日志记录器类：提供文件和控制台双重输出功能
+    
+    功能特点：
+    1. 同时输出到文件和控制台
+    2. 自动创建日志目录
+    3. 可配置的日志格式和级别
+    4. 支持多个Handler
+    """
+    
     def __init__(self, path_log):
+        """
+        初始化Logger实例
+        
+        @param path_log: 日志文件的完整路径
+        """
+        # 从完整路径中提取日志文件名（不包含路径）
         log_name = os.path.basename(path_log)
+        # 设置日志器名称：如果有文件名则使用，否则使用"root"
         self.log_name = log_name if log_name else "root"
+        # 保存日志文件的完整输出路径
         self.out_path = path_log
 
+        # 获取日志文件所在的目录路径
         log_dir = os.path.dirname(self.out_path)
+        # 检查日志目录是否存在，如果不存在则创建
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
 
     def init_logger(self):
+        """
+        初始化并配置日志记录器
+        
+        配置内容：
+        1. 设置日志级别为INFO
+        2. 创建文件输出Handler
+        3. 创建控制台输出Handler
+        4. 配置日志格式
+        5. 将Handler添加到logger
+        
+        @return: 配置好的logging.Logger实例
+        """
+        # 获取或创建指定名称的logger实例
         logger = logging.getLogger(self.log_name)
+        # 设置logger的日志级别为INFO（记录INFO及以上级别的日志）
         logger.setLevel(level=logging.INFO)
 
-        # 配置文件Handler
+        # 配置文件Handler：将日志输出到文件
+        # 创建FileHandler，'w'模式表示覆盖写入（每次运行清空之前的日志）
         file_handler = logging.FileHandler(self.out_path, 'w')
+        # 设置文件Handler的日志级别为INFO
         file_handler.setLevel(logging.INFO)
+        # 创建日志格式器：时间 - 日志器名称 - 日志级别 - 日志消息
+        # 示例输出：2023-09-25 14:30:45,123 - root - INFO - 开始训练
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        # 将格式器应用到文件Handler
         file_handler.setFormatter(formatter)
 
-        # 配置屏幕Handler
+        # 配置屏幕Handler：将日志输出到控制台
+        # 创建StreamHandler，默认输出到sys.stdout（控制台）
         console_handler = logging.StreamHandler()
+        # 设置控制台Handler的日志级别为INFO
         console_handler.setLevel(logging.INFO)
+        # 注释掉的代码：为控制台Handler设置格式器
+        # 如果不设置，控制台输出将使用默认格式
         # console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
-        # 添加handler
+        # 将配置好的Handler添加到logger
+        # 这样logger就可以同时输出到文件和控制台
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)
 
+        # 返回配置好的logger实例
         return logger
 
 
 def make_logger(out_dir):
     """
     在out_dir文件夹下以当前时间命名，创建日志文件夹，并创建logger用于记录信息
-    :param out_dir: str
-    :return:
+    
+    @param out_dir: 输出目录路径，日志文件夹将在此目录下创建
+    @return: 返回两个值：(logger, log_dir)
+             - logger: 配置好的日志记录器对象
+             - log_dir: 新创建的日志文件夹的完整路径
     """
+    # 获取当前时间
     now_time = datetime.now()
+    
+    # 将当前时间格式化为字符串：年-月-日_时-分-秒
+    # 例如：2023-09-25_14-30-45
     time_str = datetime.strftime(now_time, '%Y-%m-%d_%H-%M-%S')
-    log_dir = os.path.join(out_dir, time_str)  # 根据config中的创建时间作为文件夹名
+    
+    # 构建日志文件夹的完整路径：输出目录 + 时间字符串
+    # 根据config中的创建时间作为文件夹名，确保每次运行都有唯一的日志目录
+    log_dir = os.path.join(out_dir, time_str)
+    
+    # 检查日志文件夹是否存在，如果不存在则创建
     if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    # 创建logger
+        os.makedirs(log_dir)  # 递归创建目录，包括父目录
+    
+    # 创建logger实例
+    # 构建日志文件的完整路径：日志目录 + 日志文件名
     path_log = os.path.join(log_dir, "log.log")
+    
+    # 创建Logger类的实例
     logger = Logger(path_log)
+    
+    # 初始化日志记录器，配置日志格式、级别等参数
     logger = logger.init_logger()
+    
+    # 返回配置好的日志记录器和日志目录路径
     return logger, log_dir
 
 
