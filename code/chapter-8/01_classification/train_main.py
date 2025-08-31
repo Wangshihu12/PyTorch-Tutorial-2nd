@@ -234,15 +234,15 @@ def main(args):
         # 获取当前学习率：根据调度器类型选择不同的获取方式
         lr_current = scheduler.optimizer.param_groups[0]['lr'] if args.useplateau else scheduler.get_last_lr()[0]
         
-        # 记录详细的训练日志：epoch信息、时间、损失、准确率、学习率
+        # 记录详细的训练日志：包含epoch进度、时间统计、损失值、准确率和学习率信息
         logger.info(
-            'Epoch: [{:0>3}/{:0>3}]  '
-            'Time: {epoch_time.val:.3f} ({epoch_time.avg:.3f})  '
-            'Train Loss avg: {loss_train.avg:>6.4f}  '
-            'Valid Loss avg: {loss_valid.avg:>6.4f}  '
-            'Train Acc@1 avg:  {top1_train.avg:>7.4f}   '
-            'Valid Acc@1 avg: {top1_valid.avg:>7.4f}    '
-            'LR: {lr}'.format(
+            '当前epoch/总epoch数: [{:0>3}/{:0>3}]  '  # 显示当前epoch/总epoch数，格式化为3位数字（如：001/100）
+            '当前epoch耗时(平均耗时): {epoch_time.val:.3f} ({epoch_time.avg:.3f})  '  # 当前epoch耗时(平均耗时)，保留3位小数
+            '训练集平均损失: {loss_train.avg:>6.4f}  '  # 训练集平均损失，右对齐6位，保留4位小数
+            '验证集平均损失: {loss_valid.avg:>6.4f}  '  # 验证集平均损失，右对齐6位，保留4位小数
+            'Train Acc@1 avg:  {top1_train.avg:>7.4f}   '  # 训练集Top-1准确率，右对齐7位，保留4位小数
+            'Valid Acc@1 avg: {top1_valid.avg:>7.4f}    '  # 验证集Top-1准确率，右对齐7位，保留4位小数
+            '当前学习率: {lr}'.format(  # 当前学习率
                 epoch, args.epochs, epoch_time=epoch_time_m, loss_train=loss_m_train, loss_valid=loss_m_valid,
                 top1_train=acc_m_train, top1_valid=acc_m_valid, lr=lr_current))
 

@@ -137,74 +137,95 @@ def resnet20():
 
 def show_conf_mat(confusion_mat, classes, set_name, out_dir, epoch=999, verbose=False, perc=False, save=True):
     """
-    混淆矩阵绘制并保存图片
-    :param confusion_mat:  nd.array
-    :param classes: list or tuple, 类别名称
-    :param set_name: str, 数据集名称 train or valid or test?
-    :param out_dir:  str, 图片要保存的文件夹
-    :param epoch:  int, 第几个epoch
-    :param verbose: bool, 是否打印精度信息
-    :param perc: bool, 是否采用百分比，图像分割时用，因分类数目过大
-    :return:
+    混淆矩阵可视化函数：绘制并保存混淆矩阵图片
+    
+    @param confusion_mat: nd.array, 混淆矩阵数据
+    @param classes: list or tuple, 类别名称列表
+    @param set_name: str, 数据集名称（train/valid/test）
+    @param out_dir: str, 图片保存的文件夹路径
+    @param epoch: int, 当前epoch数，用于标题显示
+    @param verbose: bool, 是否打印详细的精度信息（召回率和精确率）
+    @param perc: bool, 是否使用百分比显示，适用于类别数量很大的情况（如图像分割）
+    @param save: bool, 是否保存图片到文件
+    @return: matplotlib.figure.Figure, 返回绘制的图形对象
     """
+    # 获取类别数量
     cls_num = len(classes)
 
-    # 归一化
-    confusion_mat_tmp = confusion_mat.copy()
+    # 混淆矩阵归一化处理：将每行除以该行的总和，得到每类的预测概率分布
+    confusion_mat_tmp = confusion_mat.copy()  # 创建副本避免修改原始数据
     for i in range(len(classes)):
+        # 对每一行进行归一化：预测为该类的样本数 / 该类真实样本总数
         confusion_mat_tmp[i, :] = confusion_mat[i, :] / confusion_mat[i, :].sum()
 
-    # 设置图像大小
+    # 根据类别数量动态设置图像大小
     if cls_num < 10:
-        figsize = 6
+        figsize = 6  # 类别少时使用较小尺寸
     elif cls_num >= 100:
-        figsize = 30
+        figsize = 30  # 类别多时使用较大尺寸
     else:
+        # 类别数量在10-100之间时，线性插值计算合适的图像大小
         figsize = np.linspace(6, 30, 91)[cls_num-10]
 
+    # 创建matplotlib图形和坐标轴对象
     fig, ax = plt.subplots(figsize=(int(figsize), int(figsize*1.3)))
 
-    # 获取颜色
-    cmap = plt.cm.get_cmap('Greys')  # 更多颜色: http://matplotlib.org/examples/color/colormaps_reference.html
+    # 设置颜色映射：使用灰度色彩映射显示混淆矩阵
+    cmap = plt.cm.get_cmap('Greys')  # 更多颜色选项: http://matplotlib.org/examples/color/colormaps_reference.html
+    # 绘制混淆矩阵热力图
     plt_object = ax.imshow(confusion_mat_tmp, cmap=cmap)
+    # 添加颜色条，显示数值与颜色的对应关系
     cbar = plt.colorbar(plt_object, ax=ax, fraction=0.03)
-    cbar.ax.tick_params(labelsize='12')
+    cbar.ax.tick_params(labelsize='12')  # 设置颜色条刻度字体大小
 
-    # 设置文字
-    xlocations = np.array(range(len(classes)))
+    # 设置坐标轴标签和刻度
+    xlocations = np.array(range(len(classes)))  # 创建类别索引数组
+    # 设置x轴（预测标签）
     ax.set_xticks(xlocations)
-    ax.set_xticklabels(list(classes), rotation=60)  # , fontsize='small'
+    ax.set_xticklabels(list(classes), rotation=60)  # 旋转标签避免重叠
+    # 设置y轴（真实标签）
     ax.set_yticks(xlocations)
     ax.set_yticklabels(list(classes))
-    ax.set_xlabel('Predict label')
-    ax.set_ylabel('True label')
-    ax.set_title("Confusion_Matrix_{}_{}".format(set_name, epoch))
+    # 设置坐标轴标题
+    ax.set_xlabel('预测标签')  # 预测标签
+    ax.set_ylabel('真实标签')     # 真实标签
+    # 设置图形标题
+    ax.set_title("混淆矩阵_{}_{}".format(set_name, epoch))
 
-    # 打印数字
+    # 在混淆矩阵中显示数值
     if perc:
-        cls_per_nums = confusion_mat.sum(axis=0)
-        conf_mat_per = confusion_mat / cls_per_nums
+        # 百分比模式：计算每个预测类别的百分比
+        cls_per_nums = confusion_mat.sum(axis=0)  # 每个预测类别的总样本数
+        conf_mat_per = confusion_mat / cls_per_nums  # 计算百分比
+        # 在每个格子中显示百分比
         for i in range(confusion_mat_tmp.shape[0]):
             for j in range(confusion_mat_tmp.shape[1]):
-                ax.text(x=j, y=i, s="{:.0%}".format(conf_mat_per[i, j]), va='center', ha='center', color='red',
-                         fontsize=10)
+                ax.text(x=j, y=i, s="{:.0%}".format(conf_mat_per[i, j]), 
+                       va='center', ha='center', color='red', fontsize=10)
     else:
+        # 绝对数值模式：显示原始的样本数量
         for i in range(confusion_mat_tmp.shape[0]):
             for j in range(confusion_mat_tmp.shape[1]):
-                ax.text(x=j, y=i, s=int(confusion_mat[i, j]), va='center', ha='center', color='red', fontsize=10)
-    # 保存
+                ax.text(x=j, y=i, s=int(confusion_mat[i, j]), 
+                       va='center', ha='center', color='red', fontsize=10)
+    
+    # 保存图片到指定目录
     if save:
-        fig.savefig(os.path.join(out_dir, "Confusion_Matrix_{}.png".format(set_name)))
-    plt.close()
+        fig.savefig(os.path.join(out_dir, "混淆矩阵_{}.png".format(set_name)))
+    plt.close()  # 关闭图形释放内存
 
+    # 详细精度信息输出：计算并显示每个类别的召回率和精确率
     if verbose:
         for i in range(cls_num):
-            print('class:{:<10}, total num:{:<6}, correct num:{:<5}  Recall: {:.2%} Precision: {:.2%}'.format(
-                classes[i], np.sum(confusion_mat[i, :]), confusion_mat[i, i],
-                confusion_mat[i, i] / (1e-9 + np.sum(confusion_mat[i, :])),
-                confusion_mat[i, i] / (1e-9 + np.sum(confusion_mat[:, i]))))
+            # 计算召回率：正确预测数 / 真实样本总数
+            recall = confusion_mat[i, i] / (1e-9 + np.sum(confusion_mat[i, :]))
+            # 计算精确率：正确预测数 / 预测为该类的总数
+            precision = confusion_mat[i, i] / (1e-9 + np.sum(confusion_mat[:, i]))
+            # 打印每个类别的详细信息
+            print('类别:{:<10}, 总样本数:{:<6}, 正确数:{:<5}  召回率: {:.2%} 精确率: {:.2%}'.format(
+                classes[i], np.sum(confusion_mat[i, :]), confusion_mat[i, i], recall, precision))
 
-    return fig
+    return fig  # 返回图形对象，可用于进一步处理或显示
 
 
 class ModelTrainer(object):
