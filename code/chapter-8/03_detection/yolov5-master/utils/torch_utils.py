@@ -87,11 +87,47 @@ def reshape_classifier_output(model, n=1000):
 
 @contextmanager
 def torch_distributed_zero_first(local_rank: int):
-    # Decorator to make all processes in distributed training wait for each local_master to do something
+    """
+    分布式训练中的进程同步上下文管理器
+    
+    功能描述：
+    确保在分布式训练中，只有第一个进程（local_rank=0）先执行特定操作，
+    其他进程等待第一个进程完成后再继续执行。这对于避免多进程同时下载
+    数据集、创建文件等操作时的冲突非常重要。
+    
+    使用场景：
+    - 数据集下载和验证（避免多进程重复下载）
+    - 文件创建操作（避免文件访问冲突）
+    - 模型权重下载（避免重复下载和文件损坏）
+    
+    @param local_rank: 本地进程排名
+                      -1: 非分布式训练（单GPU或CPU）
+                       0: 主进程（每个节点的第一个进程）
+                      >0: 从进程（需要等待主进程完成操作）
+    
+    工作原理：
+    1. 进入阶段：如果不是主进程，则等待主进程完成操作
+    2. 执行阶段：yield让调用者执行具体操作
+    3. 退出阶段：如果是主进程，则通知其他进程可以继续
+    """
+    # ================================== 进入阶段：非主进程等待 ==================================
+    # 如果当前进程不是主进程（local_rank不为-1或0），则等待主进程完成操作
     if local_rank not in [-1, 0]:
+        # 设置分布式屏障：当前进程在此处等待，直到主进程完成操作
+        # device_ids=[local_rank] 指定当前GPU设备进行同步
         dist.barrier(device_ids=[local_rank])
+    
+    # ================================== 执行阶段：让出控制权 ==================================
+    # yield 关键字使这个函数成为生成器，让调用者执行with语句块中的代码
+    # 在这里，主进程会执行实际的操作（如下载数据集、创建文件等）
+    # 其他进程如果已经通过了上面的barrier，说明主进程已经完成了操作
     yield
+    
+    # ================================== 退出阶段：主进程通知其他进程 ==================================
+    # 如果当前进程是主进程，设置屏障通知其他进程可以继续执行
     if local_rank == 0:
+        # 主进程在完成操作后，通过barrier通知所有其他进程
+        # 这样其他进程就可以从第一个barrier处继续执行
         dist.barrier(device_ids=[0])
 
 
@@ -402,31 +438,99 @@ class EarlyStopping:
 
 
 class ModelEMA:
-    """ Updated Exponential Moving Average (EMA) from https://github.com/rwightman/pytorch-image-models
-    Keeps a moving average of everything in the model state_dict (parameters and buffers)
-    For EMA details see https://www.tensorflow.org/api_docs/python/tf/train/ExponentialMovingAverage
+    """
+    指数移动平均（Exponential Moving Average, EMA）模型类
+    
+    技术来源：基于 https://github.com/rwightman/pytorch-image-models 的更新版本
+    理论参考：https://www.tensorflow.org/api_docs/python/tf/train/ExponentialMovingAverage
+    
+    EMA原理：
+    保持模型所有参数和缓冲区的指数移动平均，用于提高模型的泛化能力和训练稳定性。
+    EMA通过维护参数的历史平均值来平滑参数更新，减少训练过程中的噪声影响。
+    
+    数学公式：
+    EMA_t = decay × EMA_{t-1} + (1 - decay) × θ_t
+    其中：θ_t 是当前时刻的参数值，decay 是衰减系数
+    
+    使用优势：
+    1. 提高模型稳定性：平滑参数更新，减少训练波动
+    2. 提升泛化能力：EMA模型通常在验证集上表现更好
+    3. 无额外计算开销：推理时直接使用EMA模型
+    4. 自适应衰减：训练初期衰减较小，后期衰减较大
     """
 
     def __init__(self, model, decay=0.9999, tau=2000, updates=0):
-        # Create EMA
-        self.ema = deepcopy(de_parallel(model)).eval()  # FP32 EMA
-        self.updates = updates  # number of EMA updates
+        """
+        初始化EMA模型
+        
+        @param model: 原始训练模型，需要创建EMA副本
+        @param decay: 衰减系数，控制历史信息的保留程度（默认0.9999，即99.99%的历史信息）
+        @param tau: 时间常数，用于计算自适应衰减率（帮助早期epoch的收敛）
+        @param updates: EMA更新次数的初始值（用于恢复训练时的计数）
+        """
+        # ================================== 创建EMA模型副本 ==================================
+        # 深拷贝去分布式包装后的模型，确保EMA模型独立于原模型
+        # .eval() 设置为评估模式，关闭dropout和batchnorm的训练行为
+        self.ema = deepcopy(de_parallel(model)).eval()  # FP32 EMA - 全精度EMA模型
+        
+        # ================================== 初始化EMA参数 ==================================
+        self.updates = updates  # EMA更新次数计数器，用于自适应衰减计算
+        
+        # 自适应衰减函数：随训练进行逐渐增大衰减率
+        # 公式：decay_rate = decay × (1 - e^(-updates/tau))
+        # 训练初期：衰减率较小，更多采用当前参数
+        # 训练后期：衰减率接近decay，更多保留历史信息
         self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp (to help early epochs)
+        
+        # ================================== 冻结EMA模型参数 ==================================
+        # 将EMA模型的所有参数设置为不需要梯度，因为EMA参数不参与反向传播
         for p in self.ema.parameters():
-            p.requires_grad_(False)
+            p.requires_grad_(False)  # 禁用梯度计算，节省内存和计算
 
     def update(self, model):
-        # Update EMA parameters
-        self.updates += 1
-        d = self.decay(self.updates)
+        """
+        更新EMA模型参数
+        
+        核心算法：EMA_new = decay × EMA_old + (1 - decay) × current_params
+        这个过程为模型参数的每一个值都维护一个指数移动平均
+        
+        @param model: 当前训练的模型，用其参数更新EMA
+        """
+        # ================================== 更新计数和衰减率 ==================================
+        self.updates += 1  # 增加更新计数
+        d = self.decay(self.updates)  # 根据当前更新次数计算自适应衰减率
 
-        msd = de_parallel(model).state_dict()  # model state_dict
+        # ================================== 获取模型参数 ==================================
+        # 获取去分布式包装后的模型参数字典
+        msd = de_parallel(model).state_dict()  # model state_dict - 当前模型的状态字典
+        
+        # ================================== 逐参数更新EMA ==================================
+        # 遍历EMA模型的每个参数，使用指数移动平均公式更新
         for k, v in self.ema.state_dict().items():
+            # 只更新浮点数参数（FP16或FP32），跳过整数类型的参数（如索引等）
             if v.dtype.is_floating_point:  # true for FP16 and FP32
+                # EMA更新公式的两步实现：
+                # 步骤1：EMA参数乘以衰减系数（保留历史信息）
                 v *= d
+                # 步骤2：加上当前参数乘以(1-衰减系数)（融入新信息）
+                # .detach()确保不会影响原模型的梯度计算
                 v += (1 - d) * msd[k].detach()
+        
+        # 调试用断言（已注释）：确保EMA和模型参数都是FP32类型
         # assert v.dtype == msd[k].dtype == torch.float32, f'{k}: EMA {v.dtype} and model {msd[k].dtype} must be FP32'
 
     def update_attr(self, model, include=(), exclude=('process_group', 'reducer')):
-        # Update EMA attributes
+        """
+        更新EMA模型的属性（非参数属性）
+        
+        功能说明：
+        除了数值参数外，模型还有一些元属性（如类别数量、类别名称等），
+        这些属性不需要EMA平滑，但需要保持与训练模型同步。
+        
+        @param model: 源模型，从中复制属性
+        @param include: 需要包含的属性名称元组，如果为空则复制所有允许的属性
+        @param exclude: 需要排除的属性名称元组，通常排除分布式训练相关的属性
+        """
+        # 调用辅助函数复制模型属性，排除分布式训练相关的特殊属性
+        # 'process_group' 和 'reducer' 是分布式训练的内部属性，不应复制
         copy_attr(self.ema, model, include, exclude)

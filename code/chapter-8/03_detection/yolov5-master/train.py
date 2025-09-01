@@ -651,148 +651,233 @@ def parse_opt(known=False):
 
 
 def main(opt, callbacks=Callbacks()):
-    # Checks
-    if RANK in {-1, 0}:
-        print_args(vars(opt))
-        check_git_status()
-        check_requirements()
+    """
+    YOLOv5训练主入口函数
+    
+    功能描述：
+    这是YOLOv5训练的核心控制函数，负责整个训练流程的协调和管理，
+    包括参数验证、恢复训练、分布式设置、普通训练和超参数进化等功能。
+    
+    @param opt: 命令行参数对象，包含所有训练配置
+    @param callbacks: 回调函数管理器，用于训练过程中的事件处理
+    """
+    # ================================== 第一步：基础检查（仅主进程执行） ==================================
+    if RANK in {-1, 0}:  # 只有主进程（单机训练或分布式训练的rank=0进程）执行检查
+        print_args(vars(opt))    # 打印所有训练参数，便于调试和记录
+        check_git_status()       # 检查Git仓库状态，确保代码版本一致性
+        check_requirements()     # 检查Python依赖包是否满足要求
 
-    # Resume (from specified or most recent last.pt)
+    # ================================== 第二步：恢复训练处理 ==================================
+    # 当用户指定--resume且不是Comet实验恢复且不是超参数进化模式时，进入恢复训练流程
     if opt.resume and not check_comet_resume(opt) and not opt.evolve:
+        # 确定检查点文件路径：用户指定的路径 或 最近的训练结果
         last = Path(check_file(opt.resume) if isinstance(opt.resume, str) else get_latest_run())
+        
+        # 构建配置文件路径：检查点文件的上级目录中的opt.yaml
         opt_yaml = last.parent.parent / 'opt.yaml'  # train options yaml
-        opt_data = opt.data  # original dataset
+        opt_data = opt.data  # 备份原始数据集路径，避免被覆盖
+        
+        # 尝试从YAML文件加载训练配置
         if opt_yaml.is_file():
             with open(opt_yaml, errors='ignore') as f:
-                d = yaml.safe_load(f)
+                d = yaml.safe_load(f)  # 从YAML文件加载配置字典
         else:
+            # 如果YAML文件不存在，从检查点文件中提取配置
             d = torch.load(last, map_location='cpu')['opt']
-        opt = argparse.Namespace(**d)  # replace
+        
+        # 重建训练参数对象
+        opt = argparse.Namespace(**d)  # 用历史配置替换当前配置
+        # 重新设置关键路径参数
         opt.cfg, opt.weights, opt.resume = '', str(last), True  # reinstate
+        
+        # 处理在线数据集URL，避免HUB认证超时问题
         if is_url(opt_data):
             opt.data = check_file(opt_data)  # avoid HUB resume auth timeout
+            
+    # ================================== 第三步：新训练的参数验证和路径设置 ==================================
     else:
+        # 验证和规范化所有输入文件路径
         opt.data, opt.cfg, opt.hyp, opt.weights, opt.project = \
             check_file(opt.data), check_yaml(opt.cfg), check_yaml(opt.hyp), str(opt.weights), str(opt.project)  # checks
+        
+        # 确保用户至少指定了配置文件或预训练权重之一
         assert len(opt.cfg) or len(opt.weights), 'either --cfg or --weights must be specified'
+        
+        # ================================== 超参数进化模式的特殊设置 ==================================
         if opt.evolve:
+            # 如果使用默认项目名，重命名为进化专用目录
             if opt.project == str(ROOT / 'runs/train'):  # if default project name, rename to runs/evolve
                 opt.project = str(ROOT / 'runs/evolve')
+            # 进化模式下的特殊设置：允许目录存在，禁用恢复训练
             opt.exist_ok, opt.resume = opt.resume, False  # pass resume to exist_ok and disable resume
+        
+        # 如果实验名称为'cfg'，使用模型配置文件名作为实验名
         if opt.name == 'cfg':
             opt.name = Path(opt.cfg).stem  # use model.yaml as name
+            
+        # 生成唯一的保存目录路径，避免覆盖已有实验
         opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
 
-    # DDP mode
+    # ================================== 第四步：设备选择和分布式训练设置 ==================================
+    # 智能选择训练设备（CPU或GPU）
     device = select_device(opt.device, batch_size=opt.batch_size)
-    if LOCAL_RANK != -1:
+    
+    # 分布式数据并行（DDP）模式配置
+    if LOCAL_RANK != -1:  # 如果LOCAL_RANK != -1，说明处于分布式训练模式
         msg = 'is not compatible with YOLOv5 Multi-GPU DDP training'
-        assert not opt.image_weights, f'--image-weights {msg}'
-        assert not opt.evolve, f'--evolve {msg}'
-        assert opt.batch_size != -1, f'AutoBatch with --batch-size -1 {msg}, please pass a valid --batch-size'
-        assert opt.batch_size % WORLD_SIZE == 0, f'--batch-size {opt.batch_size} must be multiple of WORLD_SIZE'
-        assert torch.cuda.device_count() > LOCAL_RANK, 'insufficient CUDA devices for DDP command'
-        torch.cuda.set_device(LOCAL_RANK)
-        device = torch.device('cuda', LOCAL_RANK)
+        
+        # ================================== 分布式训练兼容性检查 ==================================
+        # 检查各种功能与DDP的兼容性，不兼容的功能会抛出异常
+        assert not opt.image_weights, f'--image-weights {msg}'  # 图像权重采样与DDP不兼容
+        assert not opt.evolve, f'--evolve {msg}'                # 超参数进化与DDP不兼容
+        assert opt.batch_size != -1, f'AutoBatch with --batch-size -1 {msg}, please pass a valid --batch-size'  # 自动批次大小与DDP不兼容
+        assert opt.batch_size % WORLD_SIZE == 0, f'--batch-size {opt.batch_size} must be multiple of WORLD_SIZE'  # 批次大小必须能被总进程数整除
+        assert torch.cuda.device_count() > LOCAL_RANK, 'insufficient CUDA devices for DDP command'  # 检查CUDA设备数量是否足够
+        
+        # ================================== DDP进程组初始化 ==================================
+        torch.cuda.set_device(LOCAL_RANK)               # 设置当前进程使用的GPU设备
+        device = torch.device('cuda', LOCAL_RANK)        # 创建对应的设备对象
+        # 初始化进程组：优先使用NCCL后端（GPU通信更高效），备选GLOO后端
         dist.init_process_group(backend='nccl' if dist.is_nccl_available() else 'gloo')
 
-    # Train
+    # ================================== 第五步：执行训练 ==================================
+    # 普通训练模式：直接调用训练函数
     if not opt.evolve:
-        train(opt.hyp, opt, device, callbacks)
+        train(opt.hyp, opt, device, callbacks)  # 执行单次训练
 
-    # Evolve hyperparameters (optional)
+    # ================================== 第六步：超参数进化算法（可选） ==================================
     else:
-        # Hyperparameter evolution metadata (mutation scale 0-1, lower_limit, upper_limit)
+        # 超参数进化元数据：定义每个超参数的变异范围和约束
+        # 格式：(变异增益, 下限, 上限)
         meta = {
-            'lr0': (1, 1e-5, 1e-1),  # initial learning rate (SGD=1E-2, Adam=1E-3)
-            'lrf': (1, 0.01, 1.0),  # final OneCycleLR learning rate (lr0 * lrf)
-            'momentum': (0.3, 0.6, 0.98),  # SGD momentum/Adam beta1
-            'weight_decay': (1, 0.0, 0.001),  # optimizer weight decay
-            'warmup_epochs': (1, 0.0, 5.0),  # warmup epochs (fractions ok)
-            'warmup_momentum': (1, 0.0, 0.95),  # warmup initial momentum
-            'warmup_bias_lr': (1, 0.0, 0.2),  # warmup initial bias lr
-            'box': (1, 0.02, 0.2),  # box loss gain
-            'cls': (1, 0.2, 4.0),  # cls loss gain
-            'cls_pw': (1, 0.5, 2.0),  # cls BCELoss positive_weight
-            'obj': (1, 0.2, 4.0),  # obj loss gain (scale with pixels)
-            'obj_pw': (1, 0.5, 2.0),  # obj BCELoss positive_weight
-            'iou_t': (0, 0.1, 0.7),  # IoU training threshold
-            'anchor_t': (1, 2.0, 8.0),  # anchor-multiple threshold
-            'anchors': (2, 2.0, 10.0),  # anchors per output grid (0 to ignore)
-            'fl_gamma': (0, 0.0, 2.0),  # focal loss gamma (efficientDet default gamma=1.5)
-            'hsv_h': (1, 0.0, 0.1),  # image HSV-Hue augmentation (fraction)
-            'hsv_s': (1, 0.0, 0.9),  # image HSV-Saturation augmentation (fraction)
-            'hsv_v': (1, 0.0, 0.9),  # image HSV-Value augmentation (fraction)
-            'degrees': (1, 0.0, 45.0),  # image rotation (+/- deg)
-            'translate': (1, 0.0, 0.9),  # image translation (+/- fraction)
-            'scale': (1, 0.0, 0.9),  # image scale (+/- gain)
-            'shear': (1, 0.0, 10.0),  # image shear (+/- deg)
-            'perspective': (0, 0.0, 0.001),  # image perspective (+/- fraction), range 0-0.001
-            'flipud': (1, 0.0, 1.0),  # image flip up-down (probability)
-            'fliplr': (0, 0.0, 1.0),  # image flip left-right (probability)
-            'mosaic': (1, 0.0, 1.0),  # image mixup (probability)
-            'mixup': (1, 0.0, 1.0),  # image mixup (probability)
-            'copy_paste': (1, 0.0, 1.0)}  # segment copy-paste (probability)
+            # ================================== 优化器相关参数 ==================================
+            'lr0': (1, 1e-5, 1e-1),              # 初始学习率 (SGD=1E-2, Adam=1E-3)
+            'lrf': (1, 0.01, 1.0),               # 最终学习率因子 (OneCycleLR: lr0 * lrf)
+            'momentum': (0.3, 0.6, 0.98),        # SGD动量/Adam beta1参数
+            'weight_decay': (1, 0.0, 0.001),     # 优化器权重衰减
+            
+            # ================================== 学习率预热相关参数 ==================================
+            'warmup_epochs': (1, 0.0, 5.0),     # 预热epoch数（支持小数）
+            'warmup_momentum': (1, 0.0, 0.95),  # 预热初始动量
+            'warmup_bias_lr': (1, 0.0, 0.2),    # 预热偏置学习率
+            
+            # ================================== 损失函数权重参数 ==================================
+            'box': (1, 0.02, 0.2),              # 边界框损失权重
+            'cls': (1, 0.2, 4.0),               # 分类损失权重
+            'cls_pw': (1, 0.5, 2.0),            # 分类BCE损失正样本权重
+            'obj': (1, 0.2, 4.0),               # 置信度损失权重（随像素缩放）
+            'obj_pw': (1, 0.5, 2.0),            # 置信度BCE损失正样本权重
+            
+            # ================================== 训练策略参数 ==================================
+            'iou_t': (0, 0.1, 0.7),             # IoU训练阈值
+            'anchor_t': (1, 2.0, 8.0),          # 锚框倍数阈值
+            'anchors': (2, 2.0, 10.0),          # 每个输出网格的锚框数（0表示忽略）
+            'fl_gamma': (0, 0.0, 2.0),          # focal loss gamma参数（EfficientDet默认1.5）
+            
+            # ================================== 数据增强参数 ==================================
+            # HSV颜色空间增强
+            'hsv_h': (1, 0.0, 0.1),             # 色调增强强度
+            'hsv_s': (1, 0.0, 0.9),             # 饱和度增强强度
+            'hsv_v': (1, 0.0, 0.9),             # 亮度增强强度
+            
+            # 几何变换增强
+            'degrees': (1, 0.0, 45.0),          # 图像旋转角度（±度）
+            'translate': (1, 0.0, 0.9),         # 图像平移范围（±比例）
+            'scale': (1, 0.0, 0.9),             # 图像缩放范围（±增益）
+            'shear': (1, 0.0, 10.0),            # 图像剪切角度（±度）
+            'perspective': (0, 0.0, 0.001),     # 透视变换强度（±比例，范围0-0.001）
+            
+            # 翻转和混合增强
+            'flipud': (1, 0.0, 1.0),            # 上下翻转概率
+            'fliplr': (0, 0.0, 1.0),            # 左右翻转概率
+            'mosaic': (1, 0.0, 1.0),            # Mosaic数据增强概率
+            'mixup': (1, 0.0, 1.0),             # Mixup数据增强概率
+            'copy_paste': (1, 0.0, 1.0)         # 分割复制粘贴增强概率
+        }
 
+        # ================================== 超参数初始化 ==================================
         with open(opt.hyp, errors='ignore') as f:
-            hyp = yaml.safe_load(f)  # load hyps dict
-            if 'anchors' not in hyp:  # anchors commented in hyp.yaml
-                hyp['anchors'] = 3
+            hyp = yaml.safe_load(f)  # 加载基础超参数字典
+            if 'anchors' not in hyp:  # 如果超参数中没有锚框设置
+                hyp['anchors'] = 3   # 设置默认锚框数量
+        
+        # 如果禁用自动锚框，从进化参数中移除锚框相关设置
         if opt.noautoanchor:
             del hyp['anchors'], meta['anchors']
+            
+        # 进化模式的特殊设置：只在最后epoch验证和保存
         opt.noval, opt.nosave, save_dir = True, True, Path(opt.save_dir)  # only val/save final epoch
-        # ei = [isinstance(x, (int, float)) for x in hyp.values()]  # evolvable indices
+        
+        # 定义进化结果文件路径
         evolve_yaml, evolve_csv = save_dir / 'hyp_evolve.yaml', save_dir / 'evolve.csv'
+        
+        # 如果指定了云存储桶，尝试下载已有的进化结果
         if opt.bucket:
-            # download evolve.csv if exists
+            # download evolve.csv if exists - 下载已存在的进化CSV文件
             subprocess.run([
-                'gsutil',
-                'cp',
-                f'gs://{opt.bucket}/evolve.csv',
-                str(evolve_csv),])
+                'gsutil',                          # Google Cloud Storage工具
+                'cp',                              # 复制命令
+                f'gs://{opt.bucket}/evolve.csv',   # 云端文件路径
+                str(evolve_csv),                   # 本地目标路径
+            ])
 
-        for _ in range(opt.evolve):  # generations to evolve
-            if evolve_csv.exists():  # if evolve.csv exists: select best hyps and mutate
-                # Select parent(s)
-                parent = 'single'  # parent selection method: 'single' or 'weighted'
-                x = np.loadtxt(evolve_csv, ndmin=2, delimiter=',', skiprows=1)
-                n = min(5, len(x))  # number of previous results to consider
-                x = x[np.argsort(-fitness(x))][:n]  # top n mutations
-                w = fitness(x) - fitness(x).min() + 1E-6  # weights (sum > 0)
+        # ================================== 进化主循环 ==================================
+        for _ in range(opt.evolve):  # 执行指定数量的进化代数
+            if evolve_csv.exists():  # 如果进化历史文件存在：选择最优超参数并变异
+                # ================================== 父代选择 ==================================
+                parent = 'single'  # 父代选择方法：'single'(单一) 或 'weighted'(加权)
+                x = np.loadtxt(evolve_csv, ndmin=2, delimiter=',', skiprows=1)  # 加载历史进化结果
+                n = min(5, len(x))  # 考虑的历史结果数量（最多5个）
+                x = x[np.argsort(-fitness(x))][:n]  # 按适应度降序排序，取前n个
+                w = fitness(x) - fitness(x).min() + 1E-6  # 计算选择权重（确保和>0）
+                
                 if parent == 'single' or len(x) == 1:
-                    # x = x[random.randint(0, n - 1)]  # random selection
-                    x = x[random.choices(range(n), weights=w)[0]]  # weighted selection
+                    # 单一父代选择：基于适应度权重随机选择一个父代
+                    # x = x[random.randint(0, n - 1)]  # random selection - 随机选择（已注释）
+                    x = x[random.choices(range(n), weights=w)[0]]  # weighted selection - 加权选择
                 elif parent == 'weighted':
+                    # 加权父代选择：多个父代的加权组合
                     x = (x * w.reshape(n, 1)).sum(0) / w.sum()  # weighted combination
 
-                # Mutate
-                mp, s = 0.8, 0.2  # mutation probability, sigma
-                npr = np.random
-                npr.seed(int(time.time()))
-                g = np.array([meta[k][0] for k in hyp.keys()])  # gains 0-1
-                ng = len(meta)
-                v = np.ones(ng)
+                # ================================== 变异操作 ==================================
+                mp, s = 0.8, 0.2  # 变异概率=0.8, 标准差=0.2
+                npr = np.random   # NumPy随机数生成器
+                npr.seed(int(time.time()))  # 使用当前时间作为随机种子
+                g = np.array([meta[k][0] for k in hyp.keys()])  # 提取每个参数的增益因子
+                ng = len(meta)    # 参数总数
+                v = np.ones(ng)   # 变异向量初始化
+                
+                # 生成变异向量，确保至少有一个参数发生变化
                 while all(v == 1):  # mutate until a change occurs (prevent duplicates)
+                    # 生成变异向量：增益 × 是否变异 × 正态分布噪声 × 随机缩放 + 1
                     v = (g * (npr.random(ng) < mp) * npr.randn(ng) * npr.random() * s + 1).clip(0.3, 3.0)
-                for i, k in enumerate(hyp.keys()):  # plt.hist(v.ravel(), 300)
-                    hyp[k] = float(x[i + 7] * v[i])  # mutate
+                
+                # 应用变异到各个超参数
+                for i, k in enumerate(hyp.keys()):
+                    hyp[k] = float(x[i + 7] * v[i])  # mutate - 原值乘以变异因子
 
-            # Constrain to limits
+            # ================================== 参数约束 ==================================
+            # 将所有超参数限制在预定义的合法范围内
             for k, v in meta.items():
-                hyp[k] = max(hyp[k], v[1])  # lower limit
-                hyp[k] = min(hyp[k], v[2])  # upper limit
-                hyp[k] = round(hyp[k], 5)  # significant digits
+                hyp[k] = max(hyp[k], v[1])    # 应用下限约束
+                hyp[k] = min(hyp[k], v[2])    # 应用上限约束
+                hyp[k] = round(hyp[k], 5)     # 保留5位有效数字
 
-            # Train mutation
-            results = train(hyp.copy(), opt, device, callbacks)
-            callbacks = Callbacks()
-            # Write mutation results
+            # ================================== 训练变异体 ==================================
+            results = train(hyp.copy(), opt, device, callbacks)  # 使用变异后的超参数训练
+            callbacks = Callbacks()  # 重置回调函数管理器
+            
+            # ================================== 记录变异结果 ==================================
+            # 定义要记录的关键指标
             keys = ('metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95', 'val/box_loss',
                     'val/obj_loss', 'val/cls_loss')
+            # 打印并保存变异结果
             print_mutation(keys, results, hyp.copy(), save_dir, opt.bucket)
 
-        # Plot results
-        plot_evolve(evolve_csv)
+        # ================================== 进化结果分析 ==================================
+        plot_evolve(evolve_csv)  # 生成进化过程可视化图表
+        
+        # 输出进化完成信息和使用示例
         LOGGER.info(f'Hyperparameter evolution finished {opt.evolve} generations\n'
                     f"Results saved to {colorstr('bold', save_dir)}\n"
                     f'Usage example: $ python train.py --hyp {evolve_yaml}')

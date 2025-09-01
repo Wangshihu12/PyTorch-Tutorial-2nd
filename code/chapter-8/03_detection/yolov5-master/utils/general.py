@@ -570,28 +570,88 @@ def check_dataset(data, autodownload=True):
 
 
 def check_amp(model):
-    # Check PyTorch Automatic Mixed Precision (AMP) functionality. Return True on correct operation
+    """
+    检查PyTorch自动混合精度(AMP)功能是否正常工作
+    
+    功能描述：
+    自动混合精度(Automatic Mixed Precision)是PyTorch的一个优化技术，
+    通过在合适的地方使用半精度(FP16)计算来加速训练，同时保持数值稳定性。
+    此函数验证AMP功能是否可用且结果正确。
+    
+    AMP原理：
+    - 在前向传播中自动选择FP16或FP32精度
+    - 保持梯度计算的数值稳定性
+    - 减少GPU内存占用，提高计算速度
+    
+    @param model: 待检查的PyTorch模型
+    @return: True表示AMP功能正常，False表示不支持或有问题
+    """
+    # 导入必要的模型包装类
     from models.common import AutoShape, DetectMultiBackend
 
     def amp_allclose(model, im):
-        # All close FP32 vs AMP results
-        m = AutoShape(model, verbose=False)  # model
-        a = m(im).xywhn[0]  # FP32 inference
+        """
+        内嵌函数：比较FP32和AMP推理结果的一致性
+        
+        测试逻辑：
+        1. 使用FP32精度进行推理得到结果a
+        2. 启用AMP后进行推理得到结果b  
+        3. 比较两个结果是否在容差范围内相等
+        
+        @param model: 测试模型
+        @param im: 测试图像
+        @return: True表示结果一致，False表示结果差异过大
+        """
+        # 将模型包装为AutoShape，便于直接处理图像输入
+        m = AutoShape(model, verbose=False)  # model - 关闭详细输出
+        
+        # ================================== FP32推理测试 ==================================
+        # 使用全精度(FP32)进行推理，获取归一化后的边界框坐标
+        a = m(im).xywhn[0]  # FP32 inference - xywhn表示归一化的(中心x,中心y,宽度,高度)格式
+        
+        # ================================== AMP推理测试 ==================================
+        # 启用自动混合精度模式
         m.amp = True
-        b = m(im).xywhn[0]  # AMP inference
+        # 使用AMP进行推理，获取相同格式的结果
+        b = m(im).xywhn[0]  # AMP inference - 混合精度推理
+        
+        # ================================== 结果一致性验证 ==================================
+        # 检查两个结果是否一致：
+        # 1. 形状必须相同
+        # 2. 数值在10%的绝对容差内相等（允许精度损失带来的小幅差异）
         return a.shape == b.shape and torch.allclose(a, b, atol=0.1)  # close to 10% absolute tolerance
 
-    prefix = colorstr('AMP: ')
-    device = next(model.parameters()).device  # get model device
+    # ================================== AMP支持检查 ==================================
+    prefix = colorstr('AMP: ')  # 日志前缀，带颜色格式化
+    device = next(model.parameters()).device  # 获取模型所在设备
+    
+    # AMP仅在CUDA设备上支持，CPU和MPS设备不支持
     if device.type in ('cpu', 'mps'):
-        return False  # AMP only used on CUDA devices
-    f = ROOT / 'data' / 'images' / 'bus.jpg'  # image to check
+        return False  # AMP only used on CUDA devices - AMP仅用于CUDA设备
+    
+    # ================================== 测试图像准备 ==================================
+    f = ROOT / 'data' / 'images' / 'bus.jpg'  # 本地测试图像路径
+    
+    # 图像获取优先级：
+    # 1. 优先使用本地测试图像
+    # 2. 如果本地不存在且有网络连接，使用在线图像
+    # 3. 最后备选方案：创建随机数组作为测试图像
     im = f if f.exists() else 'https://ultralytics.com/images/bus.jpg' if check_online() else np.ones((640, 640, 3))
+    
+    # ================================== AMP功能测试 ==================================
     try:
+        # 双重保险的测试策略：
+        # 测试1：使用当前模型的深拷贝进行测试（避免修改原模型）
+        # 测试2：如果测试1失败，使用预训练的yolov5n模型进行测试
+        # 任意一个测试通过即认为AMP功能正常
         assert amp_allclose(deepcopy(model), im) or amp_allclose(DetectMultiBackend('yolov5n.pt', device), im)
+        
+        # AMP检查通过，记录成功信息
         LOGGER.info(f'{prefix}checks passed ✅')
         return True
+        
     except Exception:
+        # AMP检查失败，记录警告信息并提供帮助链接
         help_url = 'https://github.com/ultralytics/yolov5/issues/7908'
         LOGGER.warning(f'{prefix}checks failed ❌, disabling Automatic Mixed Precision. See {help_url}')
         return False
