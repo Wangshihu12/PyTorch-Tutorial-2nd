@@ -388,36 +388,72 @@ def check_version(current='0.0.0', minimum='0.0.0', name='version ', pinned=Fals
 
 @TryExcept()
 def check_requirements(requirements=ROOT / 'requirements.txt', exclude=(), install=True, cmds=''):
+    """
+    检查并安装YOLOv5的依赖包
+    
+    该函数用于验证当前环境是否满足YOLOv5的运行要求，如果缺少依赖包且启用了自动安装，
+    则会尝试自动安装缺失的包。
+    
+    Args:
+        requirements: 依赖包列表，可以是文件路径、包名列表或单个包名
+        exclude: 要排除的包名列表，这些包不会被检查
+        install: 是否启用自动安装，默认为True
+        cmds: 额外的pip安装命令参数，默认为空字符串
+        
+    Returns:
+        无返回值，但会输出检查结果和安装状态
+    """
     # Check installed dependencies meet YOLOv5 requirements (pass *.txt file or list of packages or single package str)
-    prefix = colorstr('red', 'bold', 'requirements:')
-    check_python()  # check python version
-    if isinstance(requirements, Path):  # requirements.txt file
-        file = requirements.resolve()
-        assert file.exists(), f'{prefix} {file} not found, check failed.'
+    prefix = colorstr('red', 'bold', 'requirements:')  # 设置日志前缀，使用红色粗体显示
+    check_python()  # check python version - 检查Python版本是否满足要求
+    
+    # 处理requirements参数，支持多种输入格式
+    if isinstance(requirements, Path):  # requirements.txt file - 如果是文件路径
+        file = requirements.resolve()  # 解析文件路径，获取绝对路径
+        assert file.exists(), f'{prefix} {file} not found, check failed.'  # 确保文件存在
+        # 读取requirements.txt文件，解析依赖包列表
         with file.open() as f:
+            # 解析文件中的每一行，提取包名和版本要求
+            # 排除在exclude列表中的包
             requirements = [f'{x.name}{x.specifier}' for x in pkg.parse_requirements(f) if x.name not in exclude]
     elif isinstance(requirements, str):
+        # 如果是字符串，转换为列表格式
         requirements = [requirements]
 
-    s = ''
-    n = 0
+    # 初始化变量
+    s = ''  # 存储缺失的包名
+    n = 0   # 缺失包的数量
+    
+    # 逐个检查每个依赖包是否已安装
     for r in requirements:
         try:
-            pkg.require(r)
+            pkg.require(r)  # 尝试导入包，检查是否满足版本要求
         except (pkg.VersionConflict, pkg.DistributionNotFound):  # exception if requirements not met
-            s += f'"{r}" '
-            n += 1
+            # 如果包未安装或版本不匹配，记录到缺失列表
+            s += f'"{r}" '  # 添加包名到缺失列表
+            n += 1          # 增加缺失包计数
 
-    if s and install and AUTOINSTALL:  # check environment variable
+    # 如果发现缺失的包且启用了自动安装
+    if s and install and AUTOINSTALL:  # check environment variable - 检查环境变量
         LOGGER.info(f"{prefix} YOLOv5 requirement{'s' * (n > 1)} {s}not found, attempting AutoUpdate...")
+        # 输出日志：发现n个依赖包缺失，尝试自动更新
+        
         try:
-            # assert check_online(), "AutoUpdate skipped (offline)"
+            # assert check_online(), "AutoUpdate skipped (offline)" - 检查网络连接（已注释）
+            # 执行pip安装命令，安装缺失的包
             LOGGER.info(check_output(f'pip install {s} {cmds}', shell=True).decode())
+            
+            # 确定依赖来源（文件或列表）
             source = file if 'file' in locals() else requirements
+            
+            # 构建成功安装的消息
             s = f"{prefix} {n} package{'s' * (n > 1)} updated per {source}\n" \
                 f"{prefix} ⚠️ {colorstr('bold', 'Restart runtime or rerun command for updates to take effect')}\n"
+            # 输出安装成功信息，提醒用户重启运行时或重新运行命令
+            
             LOGGER.info(s)
         except Exception as e:
+            # 如果自动安装失败，输出警告信息
             LOGGER.warning(f'{prefix} ❌ {e}')
 
 

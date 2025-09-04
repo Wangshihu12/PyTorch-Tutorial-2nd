@@ -624,35 +624,78 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
 
 if __name__ == '__main__':
+    """
+    主函数：用于测试和性能分析YOLOv5模型
+    
+    该函数提供了多种功能：
+    1. 模型性能分析（逐层分析和前向-反向传播分析）
+    2. 模型测试（测试所有yolo*.yaml配置文件）
+    3. 模型融合和摘要报告
+    """
+    
+    # 创建命令行参数解析器
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5s.yaml', help='model.yaml')
-    parser.add_argument('--batch-size', type=int, default=1, help='total batch size for all GPUs')
-    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--profile', action='store_true', help='profile model speed')
-    parser.add_argument('--line-profile', action='store_true', help='profile model speed layer by layer')
-    parser.add_argument('--test', action='store_true', help='test all yolo*.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5s.yaml', help='model.yaml - 模型配置文件路径')
+    parser.add_argument('--batch-size', type=int, default=1, help='total batch size for all GPUs - 所有GPU的总批次大小')
+    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu - 设备选择')
+    parser.add_argument('--profile', action='store_true', help='profile model speed - 分析模型速度')
+    parser.add_argument('--line-profile', action='store_true', help='profile model speed layer by layer - 逐层分析模型速度')
+    parser.add_argument('--test', action='store_true', help='test all yolo*.yaml - 测试所有yolo配置文件')
+    
+    # 解析命令行参数
     opt = parser.parse_args()
-    opt.cfg = check_yaml(opt.cfg)  # check YAML
-    print_args(vars(opt))
-    device = select_device(opt.device)
+    opt.cfg = check_yaml(opt.cfg)  # check YAML - 检查YAML文件的有效性
+    print_args(vars(opt))  # 打印解析后的参数
+    device = select_device(opt.device)  # 选择设备（CPU或GPU）
 
-    # Create model
-    im = torch.rand(opt.batch_size, 3, 640, 640).to(device)
-    model = Model(opt.cfg).to(device)
+    # 创建模型
+    # 生成随机输入张量，用于测试和性能分析
+    im = torch.rand(opt.batch_size, 3, 640, 640).to(device)  # 随机输入图像 [batch_size, 3, 640, 640]
+    model = Model(opt.cfg).to(device)  # 根据配置文件创建模型并移动到指定设备
 
-    # Options
-    if opt.line_profile:  # profile layer by layer
+    # 根据不同的参数选项执行不同的功能
+    if opt.line_profile:  # profile layer by layer - 逐层性能分析
+        """
+        逐层性能分析：分析每一层的计算时间和内存使用
+        输出每层的详细信息，包括：
+        - 层名称和类型
+        - 输入输出形状
+        - 计算时间
+        - 参数数量
+        """
         model(im, profile=True)
 
-    elif opt.profile:  # profile forward-backward
-        results = profile(input=im, ops=[model], n=3)
+    elif opt.profile:  # profile forward-backward - 前向-反向传播性能分析
+        """
+        前向-反向传播性能分析：分析整个模型的训练性能
+        包括：
+        - 前向传播时间
+        - 反向传播时间
+        - 内存使用情况
+        - 计算量（FLOPs）
+        """
+        results = profile(input=im, ops=[model], n=3)  # 运行3次取平均值
 
-    elif opt.test:  # test all models
-        for cfg in Path(ROOT / 'models').rglob('yolo*.yaml'):
+    elif opt.test:  # test all models - 测试所有模型
+        """
+        测试所有模型：验证所有yolo*.yaml配置文件的有效性
+        遍历models目录下的所有yolo配置文件，尝试创建模型
+        用于确保所有配置文件都能正确构建模型
+        """
+        for cfg in Path(ROOT / 'models').rglob('yolo*.yaml'):  # 递归查找所有yolo*.yaml文件
             try:
-                _ = Model(cfg)
+                _ = Model(cfg)  # 尝试创建模型
             except Exception as e:
-                print(f'Error in {cfg}: {e}')
+                print(f'Error in {cfg}: {e}')  # 打印错误信息
 
-    else:  # report fused model summary
-        model.fuse()
+    else:  # report fused model summary - 报告融合模型摘要
+        """
+        默认行为：融合模型并输出摘要信息
+        模型融合：将Conv+BN层融合为单个Conv层，提高推理速度
+        摘要信息包括：
+        - 模型结构
+        - 参数数量
+        - 计算量
+        - 模型大小
+        """
+        model.fuse()  # 融合模型层

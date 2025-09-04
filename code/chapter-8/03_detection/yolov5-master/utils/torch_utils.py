@@ -246,15 +246,60 @@ def de_parallel(model):
 
 
 def initialize_weights(model):
+    """
+    初始化神经网络模型的权重和参数
+    
+    该函数遍历模型的所有模块，根据不同的层类型进行相应的初始化设置：
+    1. 卷积层：使用Kaiming初始化（已注释，使用默认初始化）
+    2. 批归一化层：设置eps和momentum参数
+    3. 激活函数层：启用原地操作以节省内存
+    
+    Args:
+        model: 待初始化的神经网络模型
+    """
+    # 遍历模型的所有模块（包括子模块）
     for m in model.modules():
-        t = type(m)
+        t = type(m)  # 获取当前模块的类型
+        
         if t is nn.Conv2d:
+            # 卷积层权重初始化
+            # 注意：这里使用了pass，表示不进行特殊的权重初始化
+            # 使用PyTorch的默认初始化方法
             pass  # nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            
+            # 如果取消注释，将使用Kaiming初始化：
+            # mode='fan_out': 保持前向传播中权重的方差
+            # nonlinearity='relu': 假设使用ReLU激活函数
+            
         elif t is nn.BatchNorm2d:
-            m.eps = 1e-3
-            m.momentum = 0.03
+            # 批归一化层参数设置
+            m.eps = 1e-3  # 数值稳定性参数，防止除零错误
+            m.momentum = 0.03  # 动量参数，控制运行时统计信息的更新速度
+            
+            # eps参数说明：
+            # - 用于防止方差为0时出现除零错误
+            # - 1e-3是经验值，在数值稳定性和精度之间取得平衡
+            
+            # momentum参数说明：
+            # - 控制运行时均值和方差的更新
+            # - 0.03表示新统计信息占3%，历史统计信息占97%
+            # - 较小的值使统计信息更稳定，但更新较慢
+            
         elif t in [nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU]:
-            m.inplace = True
+            # 激活函数层设置
+            m.inplace = True  # 启用原地操作，节省内存
+            
+            # 支持的激活函数类型：
+            # - nn.Hardswish: Hard Swish激活函数
+            # - nn.LeakyReLU: 带负斜率的ReLU
+            # - nn.ReLU: 标准ReLU激活函数
+            # - nn.ReLU6: 限制在[0,6]范围的ReLU
+            # - nn.SiLU: Sigmoid Linear Unit (Swish)
+            
+            # inplace=True的作用：
+            # - 直接修改输入张量，而不是创建新的张量
+            # - 节省内存，提高计算效率
+            # - 适用于大多数激活函数，但需要注意梯度计算
 
 
 def find_modules(model, mclass=nn.Conv2d):
