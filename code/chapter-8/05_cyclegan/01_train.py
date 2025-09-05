@@ -38,7 +38,7 @@ if __name__ == '__main__':
     # 创建数据集加载器
     dataloader = create_dataset(opt)  # 根据opt.dataset_mode和其他选项创建数据集
     dataset_size = len(dataloader)    # 获取数据集中图像的总数量
-    print('The number of training images = %d' % dataset_size)
+    print('训练图像数据 = %d' % dataset_size)
 
     # 创建和初始化模型
     model = create_model(opt)      # 根据opt.model和其他选项创建模型（如CycleGAN、pix2pix等）

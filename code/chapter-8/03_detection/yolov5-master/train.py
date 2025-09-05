@@ -196,7 +196,7 @@ def train(hyp, opt, device, callbacks):
             weights = attempt_download(weights)  # download if not found locally
         
         # 加载检查点到CPU，避免CUDA内存泄漏
-        ckpt = torch.load(weights, map_location='cpu')  # load checkpoint to CPU to avoid CUDA memory leak
+        ckpt = torch.load(weights, map_location='cpu', weights_only=False)  # load checkpoint to CPU to avoid CUDA memory leak
         
         # 创建模型：使用配置文件或检查点中的模型配置
         model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
@@ -453,7 +453,7 @@ def train(hyp, opt, device, callbacks):
                     imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # ================================== 前向传播 ==================================
-            with torch.cuda.amp.autocast(amp):  # 自动混合精度前向传播
+            with torch.amp.autocast(device_type='cuda' if device.type == 'cuda' else 'cpu', enabled=amp):  # 自动混合精度前向传播
                 pred = model(imgs)  # forward - 模型前向传播
                 loss, loss_items = compute_loss(pred, targets.to(device))  # 计算损失，已按batch_size缩放
                 if RANK != -1:
@@ -683,7 +683,7 @@ def main(opt, callbacks=Callbacks()):
                 d = yaml.safe_load(f)  # 从YAML文件加载配置字典
         else:
             # 如果YAML文件不存在，从检查点文件中提取配置
-            d = torch.load(last, map_location='cpu')['opt']
+            d = torch.load(last, map_location='cpu', weights_only=False)['opt']
         
         # 重建训练参数对象
         opt = argparse.Namespace(**d)  # 用历史配置替换当前配置
